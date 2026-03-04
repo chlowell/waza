@@ -50,6 +50,8 @@ performance against predefined test cases.`,
 	cmd.AddCommand(newSessionCommand())
 	cmd.AddCommand(newServeCommand())
 	cmd.AddCommand(newResultsCommand())
+	cmd.AddCommand(newGradeCommand())
+	cmd.AddCommand(newExportCommand())
 
 	return cmd
 }
