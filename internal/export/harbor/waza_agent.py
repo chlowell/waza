@@ -85,7 +85,6 @@ class WazaAgent(BaseInstalledAgent):
             "--context-dir /waza/fixtures "
             f"{model_flag} "
             "--output /logs/artifacts/waza-results.json "
-            "--transcript-dir /logs/artifacts"
             "-v "
             "2>&1 | tee /logs/artifacts/waza-output.txt"
         )

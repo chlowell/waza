@@ -1,18 +1,22 @@
 #!/bin/sh
 
 RESULTS="/logs/artifacts/waza-results.json"
-REWARD = "/logs/verifier/reward.txt"
 
+# If the waza agent didn't produce results, fail
 if [ ! -f "$RESULTS" ]; then
-    echo "No results found at $RESULTS"
+    echo "No waza results found at $RESULTS"
     echo 0 > /logs/verifier/reward.txt
     exit 0
 fi
 
-# Extract success_rate from the JSON (e.g. "success_rate": 1)
-RATE=$(grep -o '"success_rate":[^,}]*' "$RESULTS" | head -1 | sed 's/"success_rate":\s*//')
-if [ "$RATE" = "1" ]; then
-    echo 1 > "$REWARD"
-else
-    echo 0 > "$REWARD"
+waza grade /waza/eval.yaml \
+    --task "{task}" \
+    --results "$RESULTS" \
+    --workspace /app \
+    --reward-file /logs/verifier/reward.txt \
+    --reward-format txt \
+    -v 2>&1 | tee /logs/verifier/grade-output.txt
+
+if [ $? -ne 0 ]; then
+    echo 0 > /logs/verifier/reward.txt
 fi

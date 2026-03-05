@@ -138,10 +138,13 @@ func TestGenerateDockerfile(t *testing.T) {
 }
 
 func TestGenerateTestScript(t *testing.T) {
-	result := generateTestScript()
+	result := generateTestScript("explain-python-001")
 
 	require.Contains(t, result, "#!/bin/sh")
-	require.Contains(t, result, "success_rate")
+	require.Contains(t, result, "waza grade")
+	require.Contains(t, result, `--task "explain-python-001"`)
+	require.Contains(t, result, "--results")
+	require.Contains(t, result, "waza-results.json")
 	require.Contains(t, result, "reward.txt")
 }
 

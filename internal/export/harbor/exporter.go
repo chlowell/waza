@@ -95,7 +95,7 @@ func exportTask(opts *export.ExportOptions, task *models.TestCase) error {
 	}
 
 	// 4. test.sh
-	testScript := generateTestScript()
+	testScript := generateTestScript(task.TestID)
 	if err := os.WriteFile(filepath.Join(testsDir, "test.sh"), []byte(testScript), 0o755); err != nil {
 		return err
 	}
@@ -289,8 +289,8 @@ func generateTaskTOML(spec *models.BenchmarkSpec, task *models.TestCase) string 
 }
 
 // generateTestScript creates test.sh content for a Harbor task.
-func generateTestScript() string {
-	return testScript
+func generateTestScript(taskID string) string {
+	return strings.ReplaceAll(testScript, "{task}", taskID)
 }
 
 // generateSolveScript builds a solve.sh that writes synthetic output satisfying
@@ -381,11 +381,13 @@ func copyAgentFiles(outputDir string) error {
 
 // writeDatasetREADME generates a README.md in the dataset root.
 func writeDatasetREADME(opts *export.ExportOptions) error {
+	//nolint:errcheck
+
 	var b strings.Builder
 
 	b.WriteString("# Harbor Dataset\n\n")
-	b.WriteString(fmt.Sprintf("Exported from waza eval: **%s**\n\n", opts.Spec.Name))
-	b.WriteString(fmt.Sprintf("Contains %d task(s).\n\n", len(opts.Tasks)))
+	fmt.Fprintf(&b, "Exported from waza eval: **%s**\n\n", opts.Spec.Name)
+	fmt.Fprintf(&b, "Contains %d task(s).\n\n", len(opts.Tasks))
 
 	b.WriteString("## Running with any Harbor agent\n\n")
 	b.WriteString("```bash\n")
