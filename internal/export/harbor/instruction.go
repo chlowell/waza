@@ -42,25 +42,13 @@ var langFromExt = map[string]string{
 func generateInstruction(task *models.TestCase, contextDir string, thresholdKB int) string {
 	var b strings.Builder
 
-	// Title
-	b.WriteString("# ")
-	b.WriteString(task.DisplayName)
-	b.WriteString("\n\n")
-
 	// Prompt body
-	b.WriteString(task.Stimulus.Message)
+	b.WriteString("Write your response to this message in `/app/response.md`: " + task.Stimulus.Message)
 	b.WriteString("\n")
-
-	// Context section from metadata
-	if len(task.Stimulus.Metadata) > 0 {
-		b.WriteString("\n## Context\n\n")
-		for key, val := range task.Stimulus.Metadata {
-			fmt.Fprintf(&b, "- **%s**: %v\n", key, val)
-		}
-	}
 
 	// Files section
 	if len(task.Stimulus.Resources) > 0 {
+		b.WriteString("Reference the following files:")
 		b.WriteString("\n## Files\n\n")
 		for _, ref := range task.Stimulus.Resources {
 			if ref.Body != "" {
@@ -94,10 +82,6 @@ func generateInstruction(task *models.TestCase, contextDir string, thresholdKB i
 			fmt.Fprintf(&b, "- `%s` → see `/app/fixtures/%s`\n", filename, filename)
 		}
 	}
-
-	// Output instruction
-	b.WriteString("\n## Output\n\n")
-	b.WriteString("Write your response to `/app/response.md`.\n")
 
 	return b.String()
 }

@@ -2,6 +2,7 @@ package harbor
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,13 @@ import (
 	"github.com/microsoft/waza/internal/export"
 	"github.com/microsoft/waza/internal/models"
 	"gopkg.in/yaml.v3"
+)
+
+var (
+	//go:embed Dockerfile_template
+	dockerfileTemplate string
+	//go:embed test.sh
+	testScript string
 )
 
 // MatchesGlob checks if a string matches a simple glob pattern (* wildcards only).
@@ -35,6 +43,17 @@ func (e *Exporter) Export(_ context.Context, opts *export.ExportOptions) error {
 			return fmt.Errorf("exporting task %s: %w", task.TestID, err)
 		}
 	}
+
+	// Copy waza agent files into the dataset
+	if err := copyAgentFiles(opts.OutputDir); err != nil {
+		return fmt.Errorf("copying agent files: %w", err)
+	}
+
+	// Generate README with usage instructions
+	if err := writeDatasetREADME(opts); err != nil {
+		return fmt.Errorf("writing README: %w", err)
+	}
+
 	return nil
 }
 
@@ -96,6 +115,12 @@ func exportTask(opts *export.ExportOptions, task *models.TestCase) error {
 		return fmt.Errorf("writing task.yaml: %w", err)
 	}
 
+	// 8. solution/solve.sh
+	solveScript := generateSolveScript(opts.Spec, task)
+	if err := os.WriteFile(filepath.Join(solutionDir, "solve.sh"), []byte(solveScript), 0o755); err != nil {
+		return fmt.Errorf("writing solve.sh: %w", err)
+	}
+
 	return nil
 }
 
@@ -122,7 +147,6 @@ func copyFixtures(task *models.TestCase, contextDir, fixturesDir string) error {
 }
 
 func copyFile(src, dst string) error {
-
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -213,26 +237,8 @@ func writeTaskYAML(task *models.TestCase, wazaCfgDir string) error {
 	return os.WriteFile(filepath.Join(wazaCfgDir, "task.yaml"), data, 0o644)
 }
 
-// generateDockerfile creates Dockerfile content for a Harbor task environment.
 func generateDockerfile(baseImage string) string {
-	var b strings.Builder
-
-	b.WriteString("FROM ")
-	b.WriteString(baseImage)
-	b.WriteString("\n\n")
-	b.WriteString("WORKDIR /app\n\n")
-	b.WriteString("# Install dependencies for waza graders\n")
-	b.WriteString("RUN apt-get update && \\\n")
-	b.WriteString("    apt-get install -y ca-certificates python3 && \\\n")
-	b.WriteString("    rm -rf /var/lib/apt/lists/*\n\n")
-	b.WriteString("# Install waza binary\n")
-	b.WriteString("COPY waza /usr/local/bin/waza\n\n")
-	b.WriteString("# Copy waza configuration for grading\n")
-	b.WriteString("COPY waza-config/ /waza/\n\n")
-	b.WriteString("# Pre-load fixtures in the workspace\n")
-	b.WriteString("COPY waza-config/fixtures/ /app/fixtures/\n")
-
-	return b.String()
+	return strings.ReplaceAll(dockerfileTemplate, "{baseImage}", baseImage)
 }
 
 // generateTaskTOML creates task.toml content for a Harbor task.
@@ -274,39 +280,125 @@ func generateTaskTOML(spec *models.BenchmarkSpec, task *models.TestCase) string 
 	b.WriteString("\n[environment]\n")
 	b.WriteString("build_timeout_sec = 600.0\n")
 	b.WriteString("cpus = 1\n")
-	b.WriteString("memory = \"2G\"\n")
-	b.WriteString("storage = \"10G\"\n")
+	b.WriteString("memory_mb = \"2048\"\n")
+	b.WriteString("storage_mb = \"100\"\n")
 
 	return b.String()
 }
 
 // generateTestScript creates test.sh content for a Harbor task.
 func generateTestScript(taskID string) string {
-	//nolint:errcheck
+	return strings.ReplaceAll(testScript, "{task}", taskID)
+}
+
+// generateSolveScript builds a solve.sh that writes synthetic output satisfying
+// text graders and MustInclude expectations. Falls back to a stub if no
+// required strings can be extracted from grader configs.
+func generateSolveScript(spec *models.BenchmarkSpec, task *models.TestCase) string {
+	seen := make(map[string]bool)
+	var required []string
+	add := func(s string) {
+		lower := strings.ToLower(s)
+		if !seen[lower] {
+			seen[lower] = true
+			required = append(required, s)
+		}
+	}
+
+	// Collect from task expectations
+	for _, s := range task.Expectation.MustInclude {
+		add(s)
+	}
+
+	// Collect from text grader configs (global + task-specific)
+	collectTextContains := func(params map[string]any) {
+		for _, key := range []string{"contains", "contains_cs"} {
+			switch list := params[key].(type) {
+			case []any:
+				for _, item := range list {
+					if s, ok := item.(string); ok {
+						add(s)
+					}
+				}
+			case []string:
+				for _, s := range list {
+					add(s)
+				}
+			}
+		}
+	}
+
+	for _, g := range spec.Graders {
+		if g.Kind == models.GraderKindText {
+			collectTextContains(g.Parameters)
+		}
+	}
+	for _, v := range task.Validators {
+		if v.Kind == models.GraderKindText {
+			collectTextContains(v.Parameters)
+		}
+	}
 
 	var b strings.Builder
-
-	b.WriteString("#!/bin/bash\n\n")
-	fmt.Fprintf(&b, "# Waza-Harbor bridge: run waza graders against agent output\n")
-	fmt.Fprintf(&b, "# Task: %s\n\n", taskID)
-	b.WriteString("RESPONSE_FILE=\"/app/response.md\"\n\n")
-	b.WriteString("# Check if agent produced output\n")
-	b.WriteString("if [ ! -f \"$RESPONSE_FILE\" ]; then\n")
-	b.WriteString("    echo '{\"overall_score\": 0, \"error\": \"No response file found\"}' > /logs/verifier/reward.json\n")
-	b.WriteString("    exit 0\n")
-	b.WriteString("fi\n\n")
-	b.WriteString("# Run waza graders\n")
-	fmt.Fprintf(&b, "waza grade /waza/eval.yaml \\\n")
-	fmt.Fprintf(&b, "    --task %q \\\n", taskID)
-	b.WriteString("    --output \"$RESPONSE_FILE\" \\\n")
-	b.WriteString("    --context-dir /waza/fixtures \\\n")
-	b.WriteString("    --workspace /app \\\n")
-	b.WriteString("    --reward-file /logs/verifier/reward.json \\\n")
-	b.WriteString("    --reward-format json\n\n")
-	b.WriteString("# Fallback: if waza grade failed, write zero reward\n")
-	b.WriteString("if [ $? -ne 0 ]; then\n")
-	b.WriteString("    echo 0 > /logs/verifier/reward.txt\n")
-	b.WriteString("fi\n")
-
+	if len(required) == 0 {
+		b.WriteString("#!/bin/sh\n\n")
+		b.WriteString("# This is a stub solution script generated by waza export.\n")
+		b.WriteString("echo 'TODO: implement solve.sh so the Harbor oracle can complete this task and satisfy its waza graders'\n")
+		b.WriteString("exit 0\n")
+	} else {
+		b.WriteString("#!/bin/sh\n")
+		b.WriteString("# This is a synthetic solution script generated by waza export to satisfy\n")
+		b.WriteString("# simple text graders. It may need more logic to satisfy other graders.\n")
+		b.WriteString("cat > /app/response.md << 'EOF'\n")
+		b.WriteString(strings.Join(required, " "))
+		b.WriteString("\nEOF\n")
+	}
 	return b.String()
+}
+
+//go:embed waza_agent.py
+var wazaAgentPy string
+
+//go:embed install-waza.sh.j2
+var installWazaShJ2 string
+
+// copyAgentFiles writes the waza Harbor agent into the dataset's agent/ directory.
+func copyAgentFiles(outputDir string) error {
+	agentDir := filepath.Join(outputDir, "agent")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "waza_agent.py"), []byte(wazaAgentPy), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "install-waza.sh.j2"), []byte(installWazaShJ2), 0o644); err != nil {
+		return err
+	}
+	return nil
+}
+
+// writeDatasetREADME generates a README.md in the dataset root.
+func writeDatasetREADME(opts *export.ExportOptions) error {
+	var b strings.Builder
+
+	b.WriteString("# Harbor Dataset\n\n")
+	b.WriteString(fmt.Sprintf("Exported from waza eval: **%s**\n\n", opts.Spec.Name))
+	b.WriteString(fmt.Sprintf("Contains %d task(s).\n\n", len(opts.Tasks)))
+
+	b.WriteString("## Running with any Harbor agent\n\n")
+	b.WriteString("```bash\n")
+	b.WriteString("harbor run -p . -a <agent> -m <model>\n")
+	b.WriteString("```\n\n")
+
+	b.WriteString("## Running with the waza agent (Copilot SDK)\n\n")
+	b.WriteString("The `agent/` directory contains a waza Harbor agent that uses the Copilot SDK.\n\n")
+	b.WriteString("```bash\n")
+	b.WriteString("harbor run -p . \\\n")
+	b.WriteString("    --agent-import-path agent.waza_agent:WazaAgent \\\n")
+	b.WriteString("    -m copilot/gpt-4o\n")
+	b.WriteString("```\n\n")
+	b.WriteString("Set `COPILOT_GITHUB_TOKEN` in your environment for authentication.\n\n")
+	b.WriteString("The waza agent collects Copilot session transcripts in `/logs/agent/transcripts/`.\n")
+
+	return os.WriteFile(filepath.Join(opts.OutputDir, "README.md"), []byte(b.String()), 0o644)
 }

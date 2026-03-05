@@ -1,6 +1,7 @@
 package harbor
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -40,21 +41,14 @@ func TestGenerateInstruction(t *testing.T) {
 
 	result := generateInstruction(task, contextDir, 10) // 10 KB threshold
 
-	// Title
-	require.Contains(t, result, "# Explain Python Recursion")
 	// Prompt
 	require.Contains(t, result, "Explain this code to me")
-	// Context section
-	require.Contains(t, result, "## Context")
-	require.Contains(t, result, "**language**")
-	require.Contains(t, result, "**complexity**")
+	// Output location
+	require.Contains(t, result, "/app/response.md")
 	// Inlined file (factorial.py is <1KB, well under 10KB threshold)
 	require.Contains(t, result, "### factorial.py")
 	require.Contains(t, result, "```python")
 	require.Contains(t, result, "def factorial(n):")
-	// Output instruction
-	require.Contains(t, result, "## Output")
-	require.Contains(t, result, "/app/response.md")
 }
 
 func TestGenerateInstruction_InlineBody(t *testing.T) {
@@ -146,11 +140,11 @@ func TestGenerateDockerfile(t *testing.T) {
 func TestGenerateTestScript(t *testing.T) {
 	result := generateTestScript("explain-python-001")
 
-	require.Contains(t, result, "#!/bin/bash")
-	require.Contains(t, result, "# Task: explain-python-001")
-	require.Contains(t, result, "reward")
+	require.Contains(t, result, "#!/bin/sh")
 	require.Contains(t, result, `--task "explain-python-001"`)
 	require.Contains(t, result, "waza grade")
+	require.Contains(t, result, "reward")
+	require.Contains(t, result, "--reward-format txt")
 }
 
 func TestExportTask_Integration(t *testing.T) {
@@ -192,7 +186,7 @@ func TestExportTask_Integration(t *testing.T) {
 		// instruction.md exists and has content
 		instrData, err := os.ReadFile(filepath.Join(taskDir, "instruction.md"))
 		require.NoError(t, err)
-		require.Contains(t, string(instrData), task.DisplayName)
+		require.Contains(t, string(instrData), task.Stimulus.Message)
 
 		// task.toml exists
 		_, err = os.Stat(filepath.Join(taskDir, "task.toml"))
@@ -208,10 +202,11 @@ func TestExportTask_Integration(t *testing.T) {
 		require.NoError(t, err)
 		require.NotZero(t, testShInfo.Mode()&0o100, "test.sh should be executable")
 
-		// solution/ directory exists (required by Harbor)
-		solInfo, err := os.Stat(filepath.Join(taskDir, "solution"))
+		// solution/ directory exists with solve.sh
+		solveShPath := filepath.Join(taskDir, "solution", "solve.sh")
+		solveShInfo, err := os.Stat(solveShPath)
 		require.NoError(t, err)
-		require.True(t, solInfo.IsDir(), "solution should be a directory")
+		require.NotZero(t, solveShInfo.Mode()&0o100, "solve.sh should be executable")
 
 		// waza-config/eval.yaml exists
 		_, err = os.Stat(filepath.Join(taskDir, "environment", "waza-config", "eval.yaml"))
@@ -229,6 +224,53 @@ func TestExportTask_Integration(t *testing.T) {
 			require.NotEmpty(t, entries, "fixtures directory should contain copied files")
 		}
 	}
+}
+
+func TestExportIncludesAgentAndREADME(t *testing.T) {
+	root := projectRoot(t)
+	evalPath := filepath.Join(root, "examples", "code-explainer", "eval.yaml")
+	specDir := filepath.Join(root, "examples", "code-explainer")
+
+	spec, err := models.LoadBenchmarkSpec(evalPath)
+	require.NoError(t, err)
+
+	taskFiles, err := spec.ResolveTestFiles(specDir)
+	require.NoError(t, err)
+
+	var tasks []*models.TestCase
+	for _, f := range taskFiles {
+		tc, err := models.LoadTestCase(f)
+		require.NoError(t, err)
+		tasks = append(tasks, tc)
+	}
+
+	outDir := t.TempDir()
+	exporter := &Exporter{}
+	err = exporter.Export(context.Background(), &export.ExportOptions{
+		Spec:             spec,
+		Tasks:            tasks,
+		SpecDir:          specDir,
+		OutputDir:        outDir,
+		BaseImage:        "ubuntu:24.04",
+		FixtureThreshold: 10,
+		ContextDir:       filepath.Join(specDir, "fixtures"),
+	})
+	require.NoError(t, err)
+
+	// Agent files should be present
+	require.FileExists(t, filepath.Join(outDir, "agent", "waza_agent.py"))
+	require.FileExists(t, filepath.Join(outDir, "agent", "install-waza.sh.j2"))
+
+	// Agent file should contain WazaAgent class
+	agentContent, err := os.ReadFile(filepath.Join(outDir, "agent", "waza_agent.py"))
+	require.NoError(t, err)
+	require.Contains(t, string(agentContent), "class WazaAgent")
+
+	// README should be present with usage instructions
+	readme, err := os.ReadFile(filepath.Join(outDir, "README.md"))
+	require.NoError(t, err)
+	require.Contains(t, string(readme), "agent.waza_agent:WazaAgent")
+	require.Contains(t, string(readme), "COPILOT_GITHUB_TOKEN")
 }
 
 func TestMatchesGlob(t *testing.T) {
@@ -278,4 +320,81 @@ func TestDetectLang(t *testing.T) {
 			require.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestGenerateSolveScript_WithRequiredStrings(t *testing.T) {
+	spec := &models.BenchmarkSpec{
+		Graders: []models.GraderConfig{
+			{
+				Kind:       models.GraderKindText,
+				Identifier: "check_keywords",
+				Parameters: map[string]any{
+					"contains":    []any{"hello", "world"},
+					"contains_cs": []any{"Exact"},
+				},
+			},
+			{
+				Kind:       models.GraderKindInlineScript,
+				Identifier: "code_check",
+				Parameters: map[string]any{"assertions": []any{"len(output) > 5"}},
+			},
+		},
+	}
+	task := &models.TestCase{
+		Expectation: models.TestExpectation{
+			MustInclude: []string{"required"},
+		},
+	}
+
+	result := generateSolveScript(spec, task)
+
+	require.Contains(t, result, "#!/bin/sh")
+	require.Contains(t, result, "cat > /app/response.md")
+	require.Contains(t, result, "required")
+	require.Contains(t, result, "hello")
+	require.Contains(t, result, "world")
+	require.Contains(t, result, "Exact")
+	require.NotContains(t, result, "len(output)")
+}
+
+func TestGenerateSolveScript_NoRequiredStrings(t *testing.T) {
+	spec := &models.BenchmarkSpec{
+		Graders: []models.GraderConfig{
+			{
+				Kind:       models.GraderKindInlineScript,
+				Identifier: "code_check",
+				Parameters: map[string]any{"assertions": []any{"len(output) > 5"}},
+			},
+		},
+	}
+	task := &models.TestCase{}
+
+	result := generateSolveScript(spec, task)
+
+	require.Contains(t, result, "#!/bin/sh")
+	require.Contains(t, result, "stub solution")
+	require.NotContains(t, result, "cat > /app/response.md")
+}
+
+func TestGenerateSolveScript_Deduplicates(t *testing.T) {
+	spec := &models.BenchmarkSpec{
+		Graders: []models.GraderConfig{
+			{
+				Kind:       models.GraderKindText,
+				Identifier: "g1",
+				Parameters: map[string]any{"contains": []any{"hello"}},
+			},
+		},
+	}
+	task := &models.TestCase{
+		Expectation: models.TestExpectation{
+			MustInclude: []string{"hello"},
+		},
+	}
+
+	result := generateSolveScript(spec, task)
+
+	// "hello" should appear exactly once in the heredoc body
+	body := strings.SplitAfter(result, "WAZA_SOLUTION_EOF\n")[0]
+	require.Equal(t, 1, strings.Count(body, "hello"))
 }
