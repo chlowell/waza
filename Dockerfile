@@ -13,7 +13,7 @@ COPY web/ ./
 RUN npm run build
 
 # Stage 2: Build Go binary
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26 AS builder
 
 WORKDIR /build
 
@@ -36,10 +36,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags '-s -w' -o 
 RUN ./waza --version
 
 # Runtime stage - minimal alpine image
-FROM alpine:3.19
+# FROM ubuntu:24.04
+FROM node:25
 
 # Install CA certificates for HTTPS
-RUN apk --no-cache add ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
+
+RUN npm install -g @github/copilot
 
 WORKDIR /workspace
 

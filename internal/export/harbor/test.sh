@@ -1,25 +1,18 @@
 #!/bin/sh
 
-RESPONSE_FILE="/app/response.md"
+RESULTS="/logs/artifacts/waza-results.json"
+REWARD = "/logs/verifier/reward.txt"
 
-if [ ! -f "$RESPONSE_FILE" ]; then
-    echo "No response file found at $RESPONSE_FILE"
+if [ ! -f "$RESULTS" ]; then
+    echo "No results found at $RESULTS"
     echo 0 > /logs/verifier/reward.txt
     exit 0
 fi
 
-# Make the agent's response available for inspection after the run
-cp "$RESPONSE_FILE" /logs/artifacts
-
-waza grade /waza/eval.yaml \
-    --task "{task}" \
-    --output "$RESPONSE_FILE" \
-    --context-dir /waza/fixtures \
-    --workspace /app \
-    --reward-file /logs/verifier/reward.txt \
-    --reward-format txt
-
-# fail the run if waza grade errored
-if [ $? -ne 0 ]; then
-    echo 0 > /logs/verifier/reward.txt
+# Extract success_rate from the JSON (e.g. "success_rate": 1)
+RATE=$(grep -o '"success_rate":[^,}]*' "$RESULTS" | head -1 | sed 's/"success_rate":\s*//')
+if [ "$RATE" = "1" ]; then
+    echo 1 > "$REWARD"
+else
+    echo 0 > "$REWARD"
 fi

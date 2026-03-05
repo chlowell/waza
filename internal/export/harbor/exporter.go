@@ -95,7 +95,7 @@ func exportTask(opts *export.ExportOptions, task *models.TestCase) error {
 	}
 
 	// 4. test.sh
-	testScript := generateTestScript(task.TestID)
+	testScript := generateTestScript()
 	if err := os.WriteFile(filepath.Join(testsDir, "test.sh"), []byte(testScript), 0o755); err != nil {
 		return err
 	}
@@ -176,8 +176,9 @@ type minimalSpec struct {
 }
 
 type minimalConfig struct {
-	TrialsPerTask  int `yaml:"trials_per_task"`
-	TimeoutSeconds int `yaml:"timeout_seconds"`
+	TrialsPerTask  int    `yaml:"trials_per_task"`
+	TimeoutSeconds int    `yaml:"timeout_seconds"`
+	Executor       string `yaml:"executor"`
 }
 
 func writeMinimalEvalYAML(spec *models.BenchmarkSpec, task *models.TestCase, wazaCfgDir string) error {
@@ -204,6 +205,7 @@ func writeMinimalEvalYAML(spec *models.BenchmarkSpec, task *models.TestCase, waz
 		Config: minimalConfig{
 			TrialsPerTask:  1,
 			TimeoutSeconds: timeout,
+			Executor:       "copilot-sdk",
 		},
 		Graders: graders,
 		Tasks:   []string{"task.yaml"},
@@ -287,8 +289,8 @@ func generateTaskTOML(spec *models.BenchmarkSpec, task *models.TestCase) string 
 }
 
 // generateTestScript creates test.sh content for a Harbor task.
-func generateTestScript(taskID string) string {
-	return strings.ReplaceAll(testScript, "{task}", taskID)
+func generateTestScript() string {
+	return testScript
 }
 
 // generateSolveScript builds a solve.sh that writes synthetic output satisfying

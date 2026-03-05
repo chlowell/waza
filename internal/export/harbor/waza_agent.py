@@ -1,8 +1,13 @@
 """Harbor installed agent that uses waza (Copilot SDK) to solve tasks.
 
+Expects the container to have waza eval configuration pre-loaded at /waza/
+(eval.yaml, task.yaml, fixtures/) as produced by `waza export -f harbor`.
+The agent runs `waza run` against this configuration using the Copilot SDK,
+which sends the task prompt to a Copilot-backed LLM and captures the response.
+
 Usage:
-    harbor run -p <task-or-dataset> \
-        --agent-import-path harbor_tasks.agent.waza_agent:WazaAgent \
+    harbor run -p <task-or-dataset> \\
+        --agent-import-path agent.waza_agent:WazaAgent \\
         -m copilot/gpt-4o
 
 Environment variables:
@@ -12,7 +17,6 @@ Environment variables:
 import json
 import os
 import shlex
-import textwrap
 from pathlib import Path
 
 from harbor.agents.installed.base import BaseInstalledAgent, ExecInput
@@ -20,7 +24,13 @@ from harbor.models.agent.context import AgentContext
 
 
 class WazaAgent(BaseInstalledAgent):
-    """A Harbor agent backed by the waza CLI and Copilot SDK."""
+    """A Harbor agent backed by the waza CLI and Copilot SDK.
+
+    The exported Harbor task already contains a complete waza eval configuration
+    at /waza/ (eval.yaml with graders, task.yaml with the prompt, fixtures/).
+    This agent simply runs `waza run` against that configuration so the Copilot
+    SDK agent processes the task and writes output for the graders to evaluate.
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -53,9 +63,12 @@ class WazaAgent(BaseInstalledAgent):
             context.n_output_tokens = usage.get("tokens_out", 0)
 
     def create_run_agent_commands(self, instruction: str) -> list[ExecInput]:
-        """Generate commands to run waza with the Copilot SDK against the task."""
-        escaped_instruction = shlex.quote(instruction)
+        """Run waza against the pre-baked eval config in /waza/.
 
+        The container already has /waza/eval.yaml (with graders) and
+        /waza/task.yaml (with the prompt and expectations) from the export.
+        We just need to run waza with the Copilot SDK executor.
+        """
         env = {
             "COPILOT_GITHUB_TOKEN": os.environ.get("COPILOT_GITHUB_TOKEN", ""),
         }
@@ -67,41 +80,16 @@ class WazaAgent(BaseInstalledAgent):
 
         model_flag = f"--model {shlex.quote(model)}" if model else ""
 
-        # Generate a minimal eval spec on the fly inside the container.
-        # The eval has one task whose prompt is the Harbor instruction.
-        eval_yaml = textwrap.dedent("""\
-            name: harbor-task
-            config:
-              trials_per_task: 1
-              timeout_seconds: 600
-              executor: copilot-sdk
-            tasks:
-              - task.yaml
-        """)
-
-        task_yaml = textwrap.dedent(f"""\
-            id: harbor-task-001
-            name: Harbor Task
-            inputs:
-              prompt: {escaped_instruction}
-        """)
-
-        setup_cmd = (
-            "mkdir -p /tmp/waza-eval /logs/agent/transcripts && "
-            f"cat > /tmp/waza-eval/eval.yaml << 'WAZA_EVAL_EOF'\n{eval_yaml}WAZA_EVAL_EOF\n"
-            f"cat > /tmp/waza-eval/task.yaml << 'WAZA_TASK_EOF'\n{task_yaml}WAZA_TASK_EOF"
-        )
-
         run_cmd = (
-            "waza run /tmp/waza-eval/eval.yaml "
+            "waza run /waza/eval.yaml "
+            "--context-dir /waza/fixtures "
             f"{model_flag} "
-            "--output /logs/agent/waza-results.json "
-            "--transcript-dir /logs/agent/transcripts "
+            "--output /logs/artifacts/waza-results.json "
+            "--transcript-dir /logs/artifacts"
             "-v "
-            "2>&1 | tee /logs/agent/waza-output.txt"
+            "2>&1 | tee /logs/artifacts/waza-output.txt"
         )
 
         return [
-            ExecInput(command=setup_cmd, env=env),
             ExecInput(command=run_cmd, env=env, timeout_sec=660),
         ]
