@@ -51,7 +51,7 @@ Currently supported formats:
 	return cmd
 }
 
-func runExport(_ *cobra.Command, evalPath, format, outputDir string, taskFilters, tagFilters []string, baseImage string, fixtureThreshold int) error {
+func runExport(cmd *cobra.Command, evalPath, format, outputDir string, taskFilters, tagFilters []string, baseImage string, fixtureThreshold int) error {
 	if format == "" {
 		return errors.New("--format is required")
 	}
@@ -115,13 +115,11 @@ func runExport(_ *cobra.Command, evalPath, format, outputDir string, taskFilters
 		ContextDir:       filepath.Join(specDir, "fixtures"),
 	}
 
-	fmt.Printf("Exporting %d tasks to %s format → %s\n", len(tasks), exporter.Format(), outputDir)
-
 	if err := exporter.Export(context.Background(), opts); err != nil {
 		return fmt.Errorf("export failed: %w", err)
 	}
 
-	fmt.Printf("✓ Export complete: %d tasks written to %s\n", len(tasks), outputDir)
+	fmt.Printf("✓ Exported %d tasks to %s format in %s\n", len(tasks), exporter.Format(), outputDir)
 	return nil
 }
 
