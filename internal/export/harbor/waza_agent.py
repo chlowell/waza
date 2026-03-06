@@ -67,9 +67,12 @@ class WazaAgent(BaseAgent):
         /waza/task.yaml (with the prompt and expectations) from the export.
         We just need to run waza with the Copilot SDK executor.
         """
-        env = {
-            "COPILOT_GITHUB_TOKEN": os.environ.get("COPILOT_GITHUB_TOKEN", ""),
-        }
+
+        token = os.environ.get("COPILOT_GITHUB_TOKEN")
+        if not token:
+            raise ValueError("COPILOT_GITHUB_TOKEN is not set in the environment")
+
+        env = { "COPILOT_GITHUB_TOKEN": token }
 
         model = self.model_name or ""
         if "/" in model:
@@ -83,6 +86,7 @@ class WazaAgent(BaseAgent):
             f"{model_flag} "
             "--output /logs/artifacts/waza-results.json "
             "--skip-graders "
+            "-v "
             "2>&1 | tee /logs/artifacts/waza-output.txt "
         )
 
