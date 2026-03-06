@@ -36,6 +36,8 @@ import (
 )
 
 var (
+	trials          int
+	updateSnapshots bool
 	contextDir      string
 	outputPath      string
 	outputDir       string
@@ -45,7 +47,6 @@ var (
 	tagFilters      []string
 	parallel        bool
 	workers         int
-	trials          int
 	interpret       bool
 	format          string
 	enableCache     bool
@@ -62,7 +63,6 @@ var (
 	reporters       []string
 	discoverFlag    bool
 	strictFlag      bool
-	updateSnapshots bool
 	skipGradersFlag bool
 )
 

@@ -70,7 +70,6 @@ class WazaAgent(BaseAgent):
         env = {
             "COPILOT_GITHUB_TOKEN": os.environ.get("COPILOT_GITHUB_TOKEN", ""),
         }
-        print(f"logs_dir: {self.logs_dir}")
 
         model = self.model_name or ""
         if "/" in model:
@@ -83,6 +82,7 @@ class WazaAgent(BaseAgent):
             "--context-dir /waza/fixtures "
             f"{model_flag} "
             "--output /logs/artifacts/waza-results.json "
+            "--skip-graders "
             "2>&1 | tee /logs/artifacts/waza-output.txt "
         )
 
