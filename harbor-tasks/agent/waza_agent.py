@@ -25,6 +25,7 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.trajectories import (
     Agent,
     FinalMetrics,
+    Metrics,
     Observation,
     ObservationResult,
     Step,
@@ -60,6 +61,26 @@ class WazaAgent(BaseAgent):
     def _install_agent_template_path(self) -> Path:
         return Path(__file__).parent / "install-waza.sh.j2"
 
+    def populate_context_post_run(self, context: AgentContext) -> None:
+        """Read waza run EvaluationOutcome JSON and populate Harbor context with token metrics."""
+        print(os.environ)
+        results_path = Path("/app/waza-results.json")
+        if not results_path.exists():
+            return
+
+        try:
+            data = json.loads(results_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"Failed to read waza results: {exc}")
+            return
+
+        # EvaluationOutcome.summary.usage contains aggregated token counts
+        summary = data.get("summary", {})
+        usage = summary.get("usage", {})
+        if usage:
+            context.n_input_tokens = usage.get("input_tokens", None)
+            context.n_output_tokens = usage.get("output_tokens", None)
+
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         """Run waza against the pre-baked eval config in /waza/.
 
@@ -72,6 +93,7 @@ class WazaAgent(BaseAgent):
         }
         print(f"logs_dir: {self.logs_dir}")
 
+        # Strip provider prefix from model name (e.g. "copilot/gpt-4o" -> "gpt-4o")
         model = self.model_name or ""
         if "/" in model:
             model = model.split("/", 1)[-1]
@@ -83,6 +105,7 @@ class WazaAgent(BaseAgent):
             "--context-dir /waza/fixtures "
             f"{model_flag} "
             "--output /logs/artifacts/waza-results.json "
+            "-v "
             "2>&1 | tee /logs/artifacts/waza-output.txt "
         )
 
@@ -97,6 +120,9 @@ class WazaAgent(BaseAgent):
         if trajectory:
             trajectory_path = self.logs_dir / "trajectory.json"
             trajectory_path.write_text(json.dumps(trajectory.dict(), indent=2))
+            print(f"Wrote trajectory to {trajectory_path}")
+        else:
+            print("Failed to convert waza results to trajectory.")
 
     def _transcript_to_trajectory(self, results_file: Path) -> Trajectory | None:
         """Convert waza EvaluationOutcome JSON to a Harbor ATIF trajectory.
@@ -153,13 +179,12 @@ class WazaAgent(BaseAgent):
                     message=evt.get("content") or evt.get("message") or "",
                 ))
 
-            elif evt_type == "assistant.message" or evt_type == "assistant.reasoning":
+            elif evt_type == "assistant.message":
                 step_id += 1
-
                 steps.append(Step(
                     step_id=step_id,
                     source="agent",
-                    message=evt.get("content") or evt.get("reasoningText") or "",
+                    message=evt.get("content") or "",
                     model_name=self.model_name,
                 ))
 
@@ -219,6 +244,10 @@ class WazaAgent(BaseAgent):
                     observation=observation,
                     model_name=self.model_name,
                 ))
+
+        if not steps:
+            print("No steps produced from waza transcript")
+            return None
 
         return Trajectory(
             schema_version="ATIF-v1.2",
