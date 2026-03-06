@@ -220,6 +220,16 @@ class WazaAgent(BaseAgent):
                     model_name=self.model_name,
                 ))
 
+        final_output = run.get("final_output")
+        if final_output:
+            step_id += 1
+            steps.append(Step(
+                step_id=step_id,
+                source="agent",
+                message=final_output,
+                model_name=self.model_name,
+            ))
+
         return Trajectory(
             schema_version="ATIF-v1.2",
             session_id=session.get("session_id", "unknown"),
