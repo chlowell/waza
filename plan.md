@@ -336,58 +336,71 @@ harbor-dataset/                        # Harbor dataset directory
     ├── ...
 ```
 
-### Feature 2: `waza grade` Command (Standalone Grading)
+### Feature 2: `waza grade` Command (Regrading Previous Runs)
 
-A new CLI command that runs waza graders against arbitrary output. This is the key bridge: Harbor's test.sh calls `waza grade` to evaluate what the agent did.
+The Harbor bridge depends on `waza grade` regrading the JSON output from a previous `waza run --output ...` invocation. Harbor's test.sh therefore grades the run artifact produced by the agent-side `waza run`, rather than passing raw agent output directly into `waza grade`.
 
 ```
 waza grade <eval.yaml> --task <task-id> [flags]
 
 Flags:
-  --output <file>           Agent output file to grade (default: stdin)
-  --context-dir <path>      Directory with fixture files
+  --results <file>          Path to `waza run --output` JSON
   --workspace <path>        Agent workspace directory (for file graders)
-  --format <json|text>      Output format (default: json)
-  --reward-file <path>      Write Harbor-compatible reward to this path
+  --judge-model <model>     Model override for prompt graders
+  -o, --output <file>       Write merged `EvaluationOutcome` JSON
+  -v, --verbose             Verbose grader logging on stderr
 ```
 
 **What it does:**
 1. Loads the eval.yaml and finds the specified task
-2. Instantiates global graders (from eval.yaml) + task-specific graders
-3. Reads the agent's output from file or stdin
-4. Runs all graders against the output
-5. Computes weighted score
-6. Outputs results as JSON and optionally writes Harbor reward file
+2. Loads the matching run data from a previous `waza run --output` JSON file
+3. Instantiates global graders (from eval.yaml) + task-specific graders
+4. Re-runs the graders against the saved run output, transcript, and workspace
+5. Computes weighted score and prints a `GradeOutcome` JSON document to stdout
+6. Optionally writes a regraded `EvaluationOutcome` JSON file via `--output`
 
 **Example usage in Harbor test.sh:**
 ```bash
-#!/bin/bash
-# Read agent output (agent was told to write to /app/response.md)
-AGENT_OUTPUT="/app/response.md"
+#!/bin/sh
 
-# Run waza graders
+RESULTS="/logs/artifacts/waza-results.json"
+GRADE_JSON="/logs/verifier/grade.json"
+REWARD_FILE="/logs/verifier/reward.txt"
+
+# Run waza graders against the saved run artifact
 waza grade /waza/eval.yaml \
   --task "explain-python-recursion-001" \
-  --output "$AGENT_OUTPUT" \
-  --context-dir /waza/fixtures \
   --workspace /app \
-  --reward-file /logs/verifier/reward.json
+  --results "$RESULTS" \
+  > "$GRADE_JSON"
+
+# Harbor consumes a scalar reward, so extract overall_score separately.
+score=$(awk -F: '/"overall_score"/ { gsub(/[ ,]/, "", $2); print $2; exit }' "$GRADE_JSON")
+printf '%s\n' "${score:-0}" > "$REWARD_FILE"
 
 exit 0
 ```
 
-**Output format (reward.json):**
+**Output format (grade.json):**
 ```json
 {
   "overall_score": 0.85,
   "passed": true,
-  "has_explanation": 0.9,
-  "no_errors": 1.0,
-  "explains_recursion": 0.7
+  "tasks": {
+    "explain-python-recursion-001": {
+      "overall_score": 0.85,
+      "passed": true,
+      "grader_averages": {
+        "has_explanation": 0.9,
+        "no_errors": 1.0,
+        "explains_recursion": 0.7
+      }
+    }
+  }
 }
 ```
 
-This maps naturally to Harbor's `reward.json` format where each key is a metric name and each value is a float.
+Harbor still consumes a scalar reward, so the exported verifier writes `/logs/verifier/reward.txt` from `overall_score` and keeps the full grading JSON separately for debugging.
 
 ### Feature 3: Generated Artifacts Detail
 
@@ -483,30 +496,35 @@ The `waza` binary is copied into `environment/` during export so Docker can COPY
 ```bash
 #!/bin/bash
 
-# Waza-Harbor bridge: run waza graders against agent output
+# Waza-Harbor bridge: regrade the saved waza run artifact
 # Task: explain-python-recursion-001
 
-RESPONSE_FILE="/app/response.md"
+RESULTS="/logs/artifacts/waza-results.json"
+GRADE_JSON="/logs/verifier/grade.json"
+GRADE_LOG="/logs/verifier/grade-output.txt"
+REWARD_FILE="/logs/verifier/reward.txt"
 
-# Check if agent produced output
-if [ ! -f "$RESPONSE_FILE" ]; then
-    echo '{"overall_score": 0, "error": "No response file found"}' > /logs/verifier/reward.json
+# Check if the agent produced a run artifact
+if [ ! -f "$RESULTS" ]; then
+  echo 0 > "$REWARD_FILE"
     exit 0
 fi
 
 # Run waza graders
 waza grade /waza/eval.yaml \
     --task "explain-python-recursion-001" \
-    --output "$RESPONSE_FILE" \
-    --context-dir /waza/fixtures \
     --workspace /app \
-    --reward-file /logs/verifier/reward.json \
-    --format json
+  --results "$RESULTS" \
+  -v > "$GRADE_JSON" 2> "$GRADE_LOG"
 
 # Fallback: if waza grade failed, write zero reward
 if [ $? -ne 0 ]; then
-    echo 0 > /logs/verifier/reward.txt
+  echo 0 > "$REWARD_FILE"
+  exit 0
 fi
+
+score=$(awk -F: '/"overall_score"/ { gsub(/[ ,]/, "", $2); print $2; exit }' "$GRADE_JSON")
+printf '%s\n' "${score:-0}" > "$REWARD_FILE"
 ```
 
 ## Architecture
@@ -552,18 +570,18 @@ waza export eval.yaml --format harbor --output-dir ./harbor-dataset/
 Harbor starts container from environment/Dockerfile
     │
     ├─ Agent receives instruction.md
-    ├─ Agent works in /app (reads fixtures, produces output)
-    ├─ Agent writes response to /app/response.md
+    ├─ Agent works in /app and writes `/logs/artifacts/waza-results.json`
+    │  via `waza run --skip-graders --output ...`
     │
     └─ Harbor runs tests/test.sh
-        ├─ test.sh invokes: waza grade /waza/eval.yaml --task <id> ...
+      ├─ test.sh invokes: waza grade /waza/eval.yaml --task <id> --results ...
         │   ├─ Loads eval.yaml (graders section)
-        │   ├─ Loads task.yaml (task-specific graders + expected)
-        │   ├─ Reads agent output from /app/response.md
-        │   ├─ Instantiates graders (code, text, prompt, etc.)
-        │   ├─ Runs each grader against output
-        │   ├─ Computes weighted score
-        │   └─ Writes reward.json to /logs/verifier/
+      │   ├─ Loads task.yaml (task-specific graders + expected)
+      │   ├─ Loads the saved run output, transcript, and metadata
+      │   ├─ Instantiates graders (code, text, prompt, etc.)
+      │   ├─ Re-runs grading against that saved run plus `/app`
+      │   ├─ Writes GradeOutcome JSON to `/logs/verifier/grade.json`
+      │   └─ Extracts `overall_score` into `/logs/verifier/reward.txt`
         └─ Exit 0
 ```
 

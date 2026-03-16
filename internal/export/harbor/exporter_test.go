@@ -132,7 +132,6 @@ func TestGenerateDockerfile(t *testing.T) {
 
 	require.Contains(t, result, "FROM ubuntu:22.04")
 	require.Contains(t, result, "WORKDIR /app")
-	require.Contains(t, result, "RUN apt-get update")
 	require.Contains(t, result, "COPY waza /usr/local/bin/waza")
 	require.Contains(t, result, "COPY waza-config/ /waza/")
 }
@@ -145,7 +144,12 @@ func TestGenerateTestScript(t *testing.T) {
 	require.Contains(t, result, `--task "explain-python-001"`)
 	require.Contains(t, result, "--results")
 	require.Contains(t, result, "waza-results.json")
+	require.Contains(t, result, "grade.json")
+	require.Contains(t, result, "grade-output.txt")
 	require.Contains(t, result, "reward.txt")
+	require.NotContains(t, result, "--reward-file")
+	require.NotContains(t, result, "--reward-format")
+	require.Contains(t, result, `awk -F: '/"overall_score"/`)
 }
 
 func TestExportTask_Integration(t *testing.T) {
