@@ -485,11 +485,15 @@ COPY waza /usr/local/bin/waza
 # Copy waza configuration for grading
 COPY waza-config/ /waza/
 
+# Make staged skill directories discoverable to agents inside the workspace
+COPY skills/ /app/skills/
+
 # Pre-load fixtures in the workspace
 COPY waza-config/fixtures/ /app/fixtures/
 ```
 
 The `waza` binary is copied into `environment/` during export so Docker can COPY it.
+The exported build context also includes staged skill directories under `skills/<skill-name>/`, copied into the container's WORKDIR. The embedded Harbor eval must rewrite `config.skill_directories` to those exact in-container directories so `waza run` can discover them without relying on recursive search.
 
 #### tests/test.sh Generation
 
