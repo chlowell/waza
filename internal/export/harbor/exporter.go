@@ -11,6 +11,7 @@ import (
 
 	"github.com/microsoft/waza/internal/export"
 	"github.com/microsoft/waza/internal/models"
+	"github.com/microsoft/waza/internal/utils"
 	"gopkg.in/yaml.v3"
 )
 
@@ -33,6 +34,8 @@ func MatchesGlob(pattern, s string) bool {
 type Exporter struct{}
 
 var _ export.Exporter = (*Exporter)(nil)
+
+const stagedSkillsContainerRoot = "/app/skills"
 
 func (e *Exporter) Format() string { return "harbor" }
 
@@ -62,10 +65,11 @@ func exportTask(opts *export.ExportOptions, task *models.TestCase) error {
 	envDir := filepath.Join(taskDir, "environment")
 	wazaCfgDir := filepath.Join(envDir, "waza-config")
 	fixturesDir := filepath.Join(wazaCfgDir, "fixtures")
+	skillsDir := filepath.Join(envDir, "skills")
 	testsDir := filepath.Join(taskDir, "tests")
 	solutionDir := filepath.Join(taskDir, "solution")
 
-	for _, dir := range []string{taskDir, envDir, wazaCfgDir, fixturesDir, testsDir, solutionDir} {
+	for _, dir := range []string{taskDir, envDir, wazaCfgDir, fixturesDir, skillsDir, testsDir, solutionDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("creating directory %s: %w", dir, err)
 		}
@@ -74,6 +78,11 @@ func exportTask(opts *export.ExportOptions, task *models.TestCase) error {
 	contextDir := opts.ContextDir
 	if contextDir == "" {
 		contextDir = opts.SpecDir
+	}
+
+	stagedSkills, err := collectStagedSkillDirs(opts)
+	if err != nil {
+		return fmt.Errorf("collecting skill directories: %w", err)
 	}
 
 	// 1. instruction.md
@@ -105,8 +114,13 @@ func exportTask(opts *export.ExportOptions, task *models.TestCase) error {
 		return fmt.Errorf("copying fixtures: %w", err)
 	}
 
+	// 5a. Copy the skill directories so Harbor agents can load the skill under test.
+	if err := copyStagedSkillDirs(stagedSkills, skillsDir, opts.OutputDir); err != nil {
+		return fmt.Errorf("copying skill directories: %w", err)
+	}
+
 	// 6. Minimal eval.yaml
-	if err := writeMinimalEvalYAML(opts.Spec, task, wazaCfgDir); err != nil {
+	if err := writeMinimalEvalYAML(opts.Spec, task, wazaCfgDir, stagedSkills); err != nil {
 		return fmt.Errorf("writing eval.yaml: %w", err)
 	}
 
@@ -167,6 +181,160 @@ func copyFile(src, dst string) error {
 	return err
 }
 
+type stagedSkillDir struct {
+	SourcePath    string
+	StagedDirName string
+	ContainerPath string
+}
+
+func collectStagedSkillDirs(opts *export.ExportOptions) ([]stagedSkillDir, error) {
+	var candidateDirs []string
+
+	primarySkillDir, err := findSkillDir(resolveSkillSourceDir(opts))
+	if err != nil {
+		return nil, err
+	}
+	if primarySkillDir != "" {
+		candidateDirs = append(candidateDirs, primarySkillDir)
+	}
+
+	for _, skillDir := range utils.ResolvePaths(opts.Spec.Config.SkillPaths, opts.SpecDir) {
+		resolvedSkillDir, err := findSkillDir(skillDir)
+		if err != nil {
+			return nil, err
+		}
+		if resolvedSkillDir == "" {
+			return nil, fmt.Errorf("configured skill directory %q does not contain SKILL.md", skillDir)
+		}
+		candidateDirs = append(candidateDirs, resolvedSkillDir)
+	}
+
+	seenPaths := map[string]bool{}
+	seenNames := map[string]string{}
+	staged := make([]stagedSkillDir, 0, len(candidateDirs))
+	for _, dir := range candidateDirs {
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			return nil, err
+		}
+		if seenPaths[absDir] {
+			continue
+		}
+
+		stagedName := filepath.Base(absDir)
+		if prior, ok := seenNames[stagedName]; ok && prior != absDir {
+			return nil, fmt.Errorf("skill directory basename conflict for %q: %q and %q", stagedName, prior, absDir)
+		}
+
+		seenPaths[absDir] = true
+		seenNames[stagedName] = absDir
+		staged = append(staged, stagedSkillDir{
+			SourcePath:    absDir,
+			StagedDirName: stagedName,
+			ContainerPath: filepath.ToSlash(filepath.Join(stagedSkillsContainerRoot, stagedName)),
+		})
+	}
+
+	return staged, nil
+}
+
+func copyStagedSkillDirs(stagedSkills []stagedSkillDir, skillsDir, outputDir string) error {
+	for _, skillDir := range stagedSkills {
+		dst := filepath.Join(skillsDir, skillDir.StagedDirName)
+		if err := copyDir(skillDir.SourcePath, dst, outputDir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func resolveSkillSourceDir(opts *export.ExportOptions) string {
+	if opts.SpecDir != "" {
+		return opts.SpecDir
+	}
+	if filepath.Base(opts.ContextDir) == "fixtures" {
+		return filepath.Dir(opts.ContextDir)
+	}
+	return opts.ContextDir
+}
+
+func findSkillDir(specDir string) (string, error) {
+	if specDir == "" {
+		return "", nil
+	}
+
+	skillPath := filepath.Join(specDir, "SKILL.md")
+	info, err := os.Stat(skillPath)
+	if err == nil {
+		if info.IsDir() {
+			return "", fmt.Errorf("%s is a directory, expected file", skillPath)
+		}
+		return specDir, nil
+	}
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return "", err
+}
+
+func copyDir(src, dst, excludeRoot string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		skip, err := shouldSkipCopyPath(srcPath, excludeRoot)
+		if err != nil {
+			return err
+		}
+		if skip {
+			continue
+		}
+
+		if entry.IsDir() {
+			if err := copyDir(srcPath, dstPath, excludeRoot); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := copyFile(srcPath, dstPath); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func shouldSkipCopyPath(path, excludeRoot string) (bool, error) {
+	if excludeRoot == "" {
+		return false, nil
+	}
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false, err
+	}
+	absExcludeRoot, err := filepath.Abs(excludeRoot)
+	if err != nil {
+		return false, err
+	}
+
+	rel, err := filepath.Rel(absExcludeRoot, absPath)
+	if err != nil {
+		return false, err
+	}
+
+	return rel == "." || !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != "..", nil
+}
+
 // minimalSpec is the structure written to the Harbor waza-config eval.yaml.
 type minimalSpec struct {
 	Name    string                `yaml:"name"`
@@ -176,12 +344,14 @@ type minimalSpec struct {
 }
 
 type minimalConfig struct {
-	TrialsPerTask  int    `yaml:"trials_per_task"`
-	TimeoutSeconds int    `yaml:"timeout_seconds"`
-	Executor       string `yaml:"executor"`
+	TrialsPerTask  int      `yaml:"trials_per_task"`
+	TimeoutSeconds int      `yaml:"timeout_seconds"`
+	Executor       string   `yaml:"executor"`
+	SkillPaths     []string `yaml:"skill_directories,omitempty"`
+	RequiredSkills []string `yaml:"required_skills,omitempty"`
 }
 
-func writeMinimalEvalYAML(spec *models.BenchmarkSpec, task *models.TestCase, wazaCfgDir string) error {
+func writeMinimalEvalYAML(spec *models.BenchmarkSpec, task *models.TestCase, wazaCfgDir string, stagedSkills []stagedSkillDir) error {
 	// Merge global graders with task-specific validators
 	graders := make([]models.GraderConfig, len(spec.Graders))
 	copy(graders, spec.Graders)
@@ -206,6 +376,8 @@ func writeMinimalEvalYAML(spec *models.BenchmarkSpec, task *models.TestCase, waz
 			TrialsPerTask:  1,
 			TimeoutSeconds: timeout,
 			Executor:       "copilot-sdk",
+			SkillPaths:     stagedSkillPaths(stagedSkills),
+			RequiredSkills: append([]string(nil), spec.Config.RequiredSkills...),
 		},
 		Graders: graders,
 		Tasks:   []string{"task.yaml"},
@@ -218,6 +390,18 @@ func writeMinimalEvalYAML(spec *models.BenchmarkSpec, task *models.TestCase, waz
 
 	header := "# Minimal eval spec generated by waza export for Harbor\n"
 	return os.WriteFile(filepath.Join(wazaCfgDir, "eval.yaml"), append([]byte(header), data...), 0o644)
+}
+
+func stagedSkillPaths(stagedSkills []stagedSkillDir) []string {
+	if len(stagedSkills) == 0 {
+		return nil
+	}
+
+	paths := make([]string, 0, len(stagedSkills))
+	for _, skillDir := range stagedSkills {
+		paths = append(paths, skillDir.ContainerPath)
+	}
+	return paths
 }
 
 func writeTaskYAML(task *models.TestCase, wazaCfgDir string) error {

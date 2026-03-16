@@ -8,6 +8,9 @@ WORKDIR /app
 # Copy waza configuration for grading
 COPY waza-config/ /waza/
 
+# Copy staged skill directories into the workspace so agents can discover them
+COPY skills/ /app/skills/
+
 # Pre-load fixtures in the workspace
 COPY waza-config/fixtures/ /app/fixtures/
 

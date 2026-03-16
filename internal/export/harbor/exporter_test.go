@@ -11,6 +11,7 @@ import (
 	"github.com/microsoft/waza/internal/export"
 	"github.com/microsoft/waza/internal/models"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 // projectRoot returns the waza project root based on the test file location.
@@ -134,6 +135,7 @@ func TestGenerateDockerfile(t *testing.T) {
 	require.Contains(t, result, "WORKDIR /app")
 	require.Contains(t, result, "COPY waza /usr/local/bin/waza")
 	require.Contains(t, result, "COPY waza-config/ /waza/")
+	require.Contains(t, result, "COPY skills/ /app/skills/")
 }
 
 func TestGenerateTestScript(t *testing.T) {
@@ -176,6 +178,7 @@ func TestExportTask_Integration(t *testing.T) {
 
 	opts := &export.ExportOptions{
 		Spec:             spec,
+		SpecDir:          specDir,
 		OutputDir:        outDir,
 		BaseImage:        "python:3.12-slim",
 		FixtureThreshold: 10,
@@ -214,12 +217,23 @@ func TestExportTask_Integration(t *testing.T) {
 		require.NotZero(t, solveShInfo.Mode()&0o100, "solve.sh should be executable")
 
 		// waza-config/eval.yaml exists
-		_, err = os.Stat(filepath.Join(taskDir, "environment", "waza-config", "eval.yaml"))
+		evalPath := filepath.Join(taskDir, "environment", "waza-config", "eval.yaml")
+		_, err = os.Stat(evalPath)
 		require.NoError(t, err)
+
+		var embedded minimalSpec
+		data, err := os.ReadFile(evalPath)
+		require.NoError(t, err)
+		require.NoError(t, yaml.Unmarshal(data, &embedded))
+		require.Equal(t, []string{"/app/skills/code-explainer"}, embedded.Config.SkillPaths)
 
 		// waza-config/task.yaml exists
 		_, err = os.Stat(filepath.Join(taskDir, "environment", "waza-config", "task.yaml"))
 		require.NoError(t, err)
+
+		// The skill directory is staged into the Harbor image build context.
+		skillPath := filepath.Join(taskDir, "environment", "skills", filepath.Base(specDir), "SKILL.md")
+		require.FileExists(t, skillPath)
 
 		// fixtures directory has files
 		fixturesDir := filepath.Join(taskDir, "environment", "waza-config", "fixtures")
@@ -229,6 +243,124 @@ func TestExportTask_Integration(t *testing.T) {
 			require.NotEmpty(t, entries, "fixtures directory should contain copied files")
 		}
 	}
+}
+
+func TestCollectStagedSkillDirs_MissingSkillIsAllowed(t *testing.T) {
+	root := t.TempDir()
+	opts := &export.ExportOptions{
+		Spec: &models.BenchmarkSpec{
+			Config: models.Config{},
+		},
+		SpecDir: root,
+	}
+
+	staged, err := collectStagedSkillDirs(opts)
+	require.NoError(t, err)
+	require.Empty(t, staged)
+}
+
+func TestCopyStagedSkillDirs_SkipsOutputSubtree(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "SKILL.md"), []byte("# skill\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "notes.txt"), []byte("hello\n"), 0o644))
+
+	outputDir := filepath.Join(root, "harbor-out")
+	dst := filepath.Join(outputDir, "task-001", "environment", "skills")
+	require.NoError(t, os.MkdirAll(filepath.Join(outputDir, "nested"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "nested", "generated.txt"), []byte("generated\n"), 0o644))
+
+	require.NoError(t, copyStagedSkillDirs([]stagedSkillDir{{
+		SourcePath:    root,
+		StagedDirName: filepath.Base(root),
+		ContainerPath: "/app/skills/" + filepath.Base(root),
+	}}, dst, outputDir))
+
+	stagedSkillDir := filepath.Join(dst, filepath.Base(root))
+	require.FileExists(t, filepath.Join(stagedSkillDir, "SKILL.md"))
+	require.FileExists(t, filepath.Join(stagedSkillDir, "notes.txt"))
+	require.NoFileExists(t, filepath.Join(stagedSkillDir, "harbor-out", "nested", "generated.txt"))
+}
+
+func TestCollectStagedSkillDirs_IncludesConfiguredSkillDirectories(t *testing.T) {
+	root := t.TempDir()
+	specDir := filepath.Join(root, "skill-under-test")
+	sharedOne := filepath.Join(root, "shared", "azure-prepare")
+	sharedTwo := filepath.Join(root, "external", "azure-validate")
+
+	for _, dir := range []string{specDir, sharedOne, sharedTwo} {
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: test\n---\n"), 0o644))
+	}
+
+	opts := &export.ExportOptions{
+		Spec: &models.BenchmarkSpec{
+			Config: models.Config{
+				SkillPaths: []string{"../shared/azure-prepare", sharedTwo},
+			},
+		},
+		SpecDir: specDir,
+	}
+
+	staged, err := collectStagedSkillDirs(opts)
+	require.NoError(t, err)
+	require.Len(t, staged, 3)
+	require.Equal(t, specDir, staged[0].SourcePath)
+	require.Equal(t, "/app/skills/skill-under-test", staged[0].ContainerPath)
+	require.Equal(t, sharedOne, staged[1].SourcePath)
+	require.Equal(t, "/app/skills/azure-prepare", staged[1].ContainerPath)
+	require.Equal(t, sharedTwo, staged[2].SourcePath)
+	require.Equal(t, "/app/skills/azure-validate", staged[2].ContainerPath)
+}
+
+func TestCollectStagedSkillDirs_BasenameConflictFails(t *testing.T) {
+	root := t.TempDir()
+	specDir := filepath.Join(root, "skill-under-test")
+	conflictOne := filepath.Join(root, "shared", "duplicate")
+	conflictTwo := filepath.Join(root, "other", "duplicate")
+
+	for _, dir := range []string{specDir, conflictOne, conflictTwo} {
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: test\n---\n"), 0o644))
+	}
+
+	opts := &export.ExportOptions{
+		Spec: &models.BenchmarkSpec{
+			Config: models.Config{
+				SkillPaths: []string{conflictOne, conflictTwo},
+			},
+		},
+		SpecDir: specDir,
+	}
+
+	_, err := collectStagedSkillDirs(opts)
+	require.ErrorContains(t, err, "basename conflict")
+}
+
+func TestWriteMinimalEvalYAML_PreservesSkillConfig(t *testing.T) {
+	dir := t.TempDir()
+	spec := &models.BenchmarkSpec{
+		SpecIdentity: models.SpecIdentity{Name: "eval"},
+		Config: models.Config{
+			TimeoutSec:     45,
+			RequiredSkills: []string{"code-explainer", "azure-prepare"},
+		},
+		Graders: []models.GraderConfig{{Kind: models.GraderKindText, Identifier: "g1"}},
+	}
+	task := &models.TestCase{TestID: "task-1"}
+	staged := []stagedSkillDir{
+		{SourcePath: "/tmp/code-explainer", StagedDirName: "code-explainer", ContainerPath: "/app/skills/code-explainer"},
+		{SourcePath: "/tmp/azure-prepare", StagedDirName: "azure-prepare", ContainerPath: "/app/skills/azure-prepare"},
+	}
+
+	require.NoError(t, writeMinimalEvalYAML(spec, task, dir, staged))
+
+	data, err := os.ReadFile(filepath.Join(dir, "eval.yaml"))
+	require.NoError(t, err)
+
+	var embedded minimalSpec
+	require.NoError(t, yaml.Unmarshal(data, &embedded))
+	require.Equal(t, []string{"/app/skills/code-explainer", "/app/skills/azure-prepare"}, embedded.Config.SkillPaths)
+	require.Equal(t, []string{"code-explainer", "azure-prepare"}, embedded.Config.RequiredSkills)
 }
 
 func TestExportIncludesAgentAndREADME(t *testing.T) {
