@@ -329,15 +329,15 @@ func TestGenerateSolveScript_WithRequiredStrings(t *testing.T) {
 			{
 				Kind:       models.GraderKindText,
 				Identifier: "check_keywords",
-				Parameters: map[string]any{
-					"contains":    []any{"hello", "world"},
-					"contains_cs": []any{"Exact"},
+				Parameters: models.TextGraderParameters{
+					Contains:   []string{"hello", "world"},
+					ContainsCS: []string{"Exact"},
 				},
 			},
 			{
 				Kind:       models.GraderKindInlineScript,
 				Identifier: "code_check",
-				Parameters: map[string]any{"assertions": []any{"len(output) > 5"}},
+				Parameters: models.InlineScriptGraderParameters{Assertions: []string{"len(output) > 5"}},
 			},
 		},
 	}
@@ -364,7 +364,7 @@ func TestGenerateSolveScript_NoRequiredStrings(t *testing.T) {
 			{
 				Kind:       models.GraderKindInlineScript,
 				Identifier: "code_check",
-				Parameters: map[string]any{"assertions": []any{"len(output) > 5"}},
+				Parameters: models.InlineScriptGraderParameters{Assertions: []string{"len(output) > 5"}},
 			},
 		},
 	}
@@ -383,7 +383,7 @@ func TestGenerateSolveScript_Deduplicates(t *testing.T) {
 			{
 				Kind:       models.GraderKindText,
 				Identifier: "g1",
-				Parameters: map[string]any{"contains": []any{"hello"}},
+				Parameters: models.TextGraderParameters{Contains: []string{"hello"}},
 			},
 		},
 	}

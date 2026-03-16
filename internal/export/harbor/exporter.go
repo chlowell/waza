@@ -313,18 +313,28 @@ func generateSolveScript(spec *models.BenchmarkSpec, task *models.TestCase) stri
 	}
 
 	// Collect from text grader configs (global + task-specific)
-	collectTextContains := func(params map[string]any) {
-		for _, key := range []string{"contains", "contains_cs"} {
-			switch list := params[key].(type) {
-			case []any:
-				for _, item := range list {
-					if s, ok := item.(string); ok {
+	collectTextContains := func(params models.GraderParameters) {
+		switch p := params.(type) {
+		case models.TextGraderParameters:
+			for _, s := range p.Contains {
+				add(s)
+			}
+			for _, s := range p.ContainsCS {
+				add(s)
+			}
+		case models.GenericGraderParameters:
+			for _, key := range []string{"contains", "contains_cs"} {
+				switch list := p[key].(type) {
+				case []any:
+					for _, item := range list {
+						if s, ok := item.(string); ok {
+							add(s)
+						}
+					}
+				case []string:
+					for _, s := range list {
 						add(s)
 					}
-				}
-			case []string:
-				for _, s := range list {
-					add(s)
 				}
 			}
 		}

@@ -1,15 +1,14 @@
 FROM {baseImage}
+
 WORKDIR /app
-# Install dependencies for waza graders
-RUN apt-get update && \
-    apt-get install -y ca-certificates python3 && \
-    rm -rf /var/lib/apt/lists/*
 
 # Install waza binary
 # TODO: COPY waza /usr/local/bin/waza
 
 # Copy waza configuration for grading
 COPY waza-config/ /waza/
+
 # Pre-load fixtures in the workspace
 COPY waza-config/fixtures/ /app/fixtures/
+
 ENTRYPOINT []

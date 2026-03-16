@@ -17,6 +17,9 @@ FROM golang:1.26 AS builder
 
 WORKDIR /build
 
+# Copy built web assets from web-builder stage
+COPY --from=web-builder /build/web/dist/ web/dist/
+
 # Copy go mod files first for better layer caching
 COPY go.mod go.sum ./
 
@@ -26,32 +29,26 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Copy built web assets from web-builder stage
-COPY --from=web-builder /build/web/dist/ web/dist/
-
 # Build the binary with static linking
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags '-s -w' -o waza ./cmd/waza
 
 # Verify the binary works
 RUN ./waza --version
 
-# Runtime stage - minimal alpine image
-# FROM ubuntu:24.04
-FROM node:25
+# Stage 3: Final image
+FROM node:25-slim
 
-# Install CA certificates for HTTPS
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    python3
 
 RUN npm install -g @github/copilot
 
 WORKDIR /workspace
 
-# Copy the binary from builder
 COPY --from=builder /build/waza /usr/local/bin/waza
 
-# Verify installation
 RUN waza --version
 
-# Default command shows help
 ENTRYPOINT ["waza"]
 CMD ["--help"]
