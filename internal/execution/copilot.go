@@ -39,6 +39,9 @@ type CopilotEngine struct {
 
 	shutdownOnce sync.Once
 	shutdownErr  error
+
+	noCleanup           bool
+	preservedWorkspaces []string
 }
 
 // CopilotEngineBuilder builds a CopilotEngine with options
@@ -82,6 +85,13 @@ func NewCopilotEngineBuilder(defaultModelID string, options *CopilotEngineBuilde
 
 func (b *CopilotEngineBuilder) Build() *CopilotEngine {
 	return b.engine
+}
+
+// WithNoCleanup configures the engine to skip deleting workspace directories
+// and Copilot sessions during Shutdown. Useful for debugging.
+func (b *CopilotEngineBuilder) WithNoCleanup(noCleanup bool) *CopilotEngineBuilder {
+	b.engine.noCleanup = noCleanup
+	return b
 }
 
 // Initialize sets up the Copilot client
@@ -279,9 +289,11 @@ func (e *CopilotEngine) doShutdown(ctx context.Context) error {
 		return s
 	}()
 
-	for id := range sessions {
-		if err := e.client.DeleteSession(ctx, id); err != nil {
-			slog.Debug("failed to delete session", "sessionID", id, "error", err)
+	if !e.noCleanup {
+		for id := range sessions {
+			if err := e.client.DeleteSession(ctx, id); err != nil {
+				slog.Debug("failed to delete session", "sessionID", id, "error", err)
+			}
 		}
 	}
 
@@ -289,8 +301,6 @@ func (e *CopilotEngine) doShutdown(ctx context.Context) error {
 		return fmt.Errorf("failed to stop client: %w", err)
 	}
 
-	// remove the workspace folders - should be safe now that all the copilot sessions are shut down
-	// and the tests are complete.
 	workspaces := func() []string {
 		e.workspacesMu.Lock()
 		defer e.workspacesMu.Unlock()
@@ -299,12 +309,23 @@ func (e *CopilotEngine) doShutdown(ctx context.Context) error {
 		return workspaces
 	}()
 
-	for _, ws := range workspaces {
-		if ws != "" {
-			if err := os.RemoveAll(ws); err != nil {
-				// errors here probably indicate some issue with our code continuing to lock files
-				// even after tests have completed...
-				slog.Warn("failed to cleanup stale workspace", "path", ws, "error", err)
+	if e.noCleanup {
+		for _, ws := range workspaces {
+			if ws != "" {
+				e.preservedWorkspaces = append(e.preservedWorkspaces, ws)
+				slog.Info("preserved workspace", "path", ws)
+			}
+		}
+	} else {
+		// remove the workspace folders - should be safe now that all the copilot sessions are shut down
+		// and the tests are complete.
+		for _, ws := range workspaces {
+			if ws != "" {
+				if err := os.RemoveAll(ws); err != nil {
+					// errors here probably indicate some issue with our code continuing to lock files
+					// even after tests have completed...
+					slog.Warn("failed to cleanup stale workspace", "path", ws, "error", err)
+				}
 			}
 		}
 	}
@@ -323,6 +344,12 @@ func (e *CopilotEngine) SessionUsage(sessionID string) *models.UsageStats {
 		usage = u.UsageStats()
 	}
 	return usage
+}
+
+// PreservedWorkspaces returns the workspace directories that were preserved
+// during Shutdown when noCleanup is enabled. Returns nil otherwise.
+func (e *CopilotEngine) PreservedWorkspaces() []string {
+	return e.preservedWorkspaces
 }
 
 func (e *CopilotEngine) extractReqParams(req *ExecutionRequest) (modelID string, sourceDir string, err error) {

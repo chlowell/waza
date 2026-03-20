@@ -9,6 +9,7 @@ import (
 	"github.com/microsoft/waza/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 )
 
 // SpyEngine wraps an AgentEngine and tracks Shutdown calls.
@@ -41,6 +42,10 @@ func (s *SpyEngine) Shutdown(ctx context.Context) error {
 
 func (s *SpyEngine) SessionUsage(sessionID string) *models.UsageStats {
 	return s.Inner.SessionUsage(sessionID)
+}
+
+func (s *SpyEngine) PreservedWorkspaces() []string {
+	return s.Inner.PreservedWorkspaces()
 }
 
 func (s *SpyEngine) WasCalled() bool {
@@ -196,6 +201,113 @@ func TestCopilotEngine_Shutdown_WithCancelledContext(t *testing.T) {
 
 	err := engine.Shutdown(ctx)
 	assert.NoError(t, err, "CopilotEngine.Shutdown should handle canceled context gracefully")
+}
+
+// ---------------------------------------------------------------------------
+// NoCleanup behavior
+// ---------------------------------------------------------------------------
+
+func TestMockEngine_NoCleanup_PreservesWorkspace(t *testing.T) {
+	tmp := t.TempDir()
+	// MockEngine uses os.MkdirTemp which relies on these env vars to determine where to create temp dirs
+	t.Setenv("TMPDIR", tmp) // Unix/macOS
+	t.Setenv("TMP", tmp)    // Windows
+
+	engine := NewMockEngineBuilder("test-model").WithNoCleanup(true).Build()
+	ctx := context.Background()
+
+	require.NoError(t, engine.Initialize(ctx))
+	resp, err := engine.Execute(ctx, &ExecutionRequest{Message: "hello"})
+	require.NoError(t, err)
+
+	wsDir := resp.WorkspaceDir
+	require.DirExists(t, wsDir, "workspace should exist before shutdown")
+
+	require.NoError(t, engine.Shutdown(ctx))
+
+	assert.DirExists(t, wsDir, "workspace should still exist after shutdown with no-cleanup")
+	assert.Equal(t, []string{wsDir}, engine.PreservedWorkspaces())
+}
+
+func TestMockEngine_NoCleanup_PreservesAcrossExecutions(t *testing.T) {
+	// MockEngine uses os.MkdirTemp which relies on these env vars to determine where to create temp dirs
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp) // Unix/macOS
+	t.Setenv("TMP", tmp)    // Windows
+
+	engine := NewMockEngineBuilder("test-model").WithNoCleanup(true).Build()
+	ctx := context.Background()
+
+	require.NoError(t, engine.Initialize(ctx))
+
+	resp1, err := engine.Execute(ctx, &ExecutionRequest{Message: "first"})
+	require.NoError(t, err)
+	ws1 := resp1.WorkspaceDir
+
+	resp2, err := engine.Execute(ctx, &ExecutionRequest{Message: "second"})
+	require.NoError(t, err)
+	ws2 := resp2.WorkspaceDir
+
+	// Both workspaces should exist (no-cleanup prevents per-execute removal)
+	assert.DirExists(t, ws1, "first workspace should still exist")
+	assert.DirExists(t, ws2, "second workspace should still exist")
+
+	require.NoError(t, engine.Shutdown(ctx))
+
+	assert.Equal(t, []string{ws1, ws2}, engine.PreservedWorkspaces())
+}
+
+func TestMockEngine_Cleanup_RemovesWorkspace(t *testing.T) {
+	engine := NewMockEngine("test-model")
+	ctx := context.Background()
+
+	require.NoError(t, engine.Initialize(ctx))
+	resp, err := engine.Execute(ctx, &ExecutionRequest{Message: "hello"})
+	require.NoError(t, err)
+
+	wsDir := resp.WorkspaceDir
+	require.DirExists(t, wsDir)
+
+	require.NoError(t, engine.Shutdown(ctx))
+
+	assert.NoDirExists(t, wsDir, "workspace should be removed after shutdown without no-cleanup")
+	assert.Nil(t, engine.PreservedWorkspaces())
+}
+
+func TestCopilotEngine_NoCleanup_PreservesWorkspace(t *testing.T) {
+	engine := NewCopilotEngineBuilder("test-model", nil).
+		WithNoCleanup(true).
+		Build()
+
+	// Simulate a workspace existing
+	tmpDir := t.TempDir()
+	engine.workspacesMu.Lock()
+	engine.workspaces = append(engine.workspaces, tmpDir)
+	engine.workspacesMu.Unlock()
+
+	require.NoError(t, engine.Shutdown(context.Background()))
+
+	assert.DirExists(t, tmpDir, "workspace should still exist with no-cleanup")
+	assert.Equal(t, []string{tmpDir}, engine.PreservedWorkspaces())
+}
+
+func TestCopilotEngine_NoCleanup_SkipsSessionDeletion(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	clientMock := NewMockCopilotClient(ctrl)
+
+	engine := &CopilotEngine{
+		defaultModelID: "test-model",
+		client:         clientMock,
+		noCleanup:      true,
+		sessions: map[string]CopilotSession{
+			"session-1": nil,
+		},
+	}
+
+	// Only expect Stop(), NOT DeleteSession()
+	clientMock.EXPECT().Stop().Return(nil)
+
+	require.NoError(t, engine.Shutdown(context.Background()))
 }
 
 // ---------------------------------------------------------------------------

@@ -608,6 +608,22 @@ Logs are stored in NDJSON format (one event per line):
 {"event":"task_completed","id":"basic-usage","passed":true,"timestamp":"2024-01-15T10:30:05Z"}
 ```
 
+### Preserving Workspaces
+
+Use `--no-cleanup` to keep workspace directories and agent sessions after a run completes.
+This is useful for inspecting files the agent created or modified during evaluation:
+
+```bash
+waza run evals/code-explainer/eval.yaml --no-cleanup
+```
+
+Preserved workspace paths are printed after the run:
+```
+Preserved workspaces (--no-cleanup):
+  /tmp/waza-abc123
+  /tmp/waza-def456
+```
+
 ---
 
 ### Output Formats

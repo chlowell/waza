@@ -268,6 +268,7 @@ Run an evaluation benchmark from a spec file.
 | `--discover` | | Auto skill discovery — walks directory tree for SKILL.md + eval.yaml (root/tests/evals) |
 | `--strict` | | Fail if any SKILL.md lacks eval coverage (use with `--discover`) |
 | `--suggest` | | Generate a Copilot suggestion report based on test outcomes (`mock` engine emits a deterministic fake report) |
+| `--no-cleanup` | | Preserve workspace directories and agent sessions after the run (useful for debugging) |
 
 **Result Caching**
 

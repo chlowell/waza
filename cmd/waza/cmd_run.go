@@ -65,6 +65,7 @@ var (
 	strictFlag      bool
 	updateSnapshots bool
 	skipGradersFlag bool
+	noCleanup       bool
 
 	// newCopilotClientFn allows you to override the client used by the copilot engine, for this command.
 	newCopilotClientFn func(clientOptions *copilot.ClientOptions) execution.CopilotClient
@@ -124,6 +125,7 @@ You can also specify a skill name to run its eval:
 	cmd.Flags().BoolVar(&strictFlag, "strict", false, "With --discover, fail if any SKILL.md lacks an eval.yaml")
 	cmd.Flags().BoolVar(&updateSnapshots, "update-snapshots", false, "Update or create diff grader snapshot files to match current workspace output")
 	cmd.Flags().BoolVar(&skipGradersFlag, "skip-graders", false, "Skip grading (execution only); use with waza grade to grade later")
+	cmd.Flags().BoolVar(&noCleanup, "no-cleanup", false, "Don't remove workspaces or agent sessions after the run completes")
 
 	return cmd
 }
@@ -629,20 +631,30 @@ func runSingleModel(cmd *cobra.Command, spec *models.BenchmarkSpec, specPath str
 
 	switch spec.Config.EngineType {
 	case "mock":
-		engine = execution.NewMockEngine(spec.Config.ModelID)
+		engine = execution.NewMockEngineBuilder(spec.Config.ModelID).
+			WithNoCleanup(noCleanup).Build()
 	case "copilot-sdk":
 		engine = execution.NewCopilotEngineBuilder(spec.Config.ModelID, &execution.CopilotEngineBuilderOptions{
 			NewCopilotClient: newCopilotClientFn, // if nil, uses the real function, otherwise overridable for tests.
-		}).Build()
+		}).WithNoCleanup(noCleanup).Build()
 	default:
 		return nil, fmt.Errorf("unknown engine type: %s", spec.Config.EngineType)
 	}
 	if err := engine.Initialize(context.Background()); err != nil {
 		return nil, fmt.Errorf("failed to initialize agent: %w", err)
 	}
+	// this will be assigned later; we declare it here so it's in scope for the deferred function
+	var outcome *models.EvaluationOutcome
 	defer func() {
-		if err := engine.Shutdown(context.Background()); err != nil {
-			slog.Warn("engine shutdown failed", "error", err)
+		if shutdownErr := engine.Shutdown(context.Background()); shutdownErr != nil {
+			slog.Warn("engine shutdown failed", "error", shutdownErr)
+		}
+		execution.UpdateOutcomeUsage(outcome, engine) // this method handles nil outcomes
+		if preserved := engine.PreservedWorkspaces(); len(preserved) > 0 {
+			fmt.Fprintln(cmd.OutOrStdout(), "\nPreserved workspaces (--no-cleanup):") //nolint:errcheck
+			for _, ws := range preserved {
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", ws) //nolint:errcheck
+			}
 		}
 	}()
 
@@ -745,9 +757,10 @@ func runSingleModel(cmd *cobra.Command, spec *models.BenchmarkSpec, specPath str
 
 	fmt.Println()
 
-	outcome, err := runner.RunBenchmark(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("benchmark failed: %w", err)
+	var runErr error
+	outcome, runErr = runner.RunBenchmark(ctx)
+	if runErr != nil {
+		return nil, fmt.Errorf("benchmark failed: %w", runErr)
 	}
 
 	// Log task completion and session summary from outcome data
@@ -824,12 +837,6 @@ func runSingleModel(cmd *cobra.Command, spec *models.BenchmarkSpec, specPath str
 			outcome.Metadata["suggestion_report"] = report
 		}
 	}
-
-	// shut down the engine and update outcome with final usage data
-	if err := engine.Shutdown(context.Background()); err != nil {
-		slog.Warn("engine shutdown failed", "error", err)
-	}
-	execution.UpdateOutcomeUsage(outcome, engine)
 
 	// Print results based on format
 	switch format {

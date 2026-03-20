@@ -16,8 +16,12 @@ import (
 type MockEngine struct {
 	modelID    string
 	workspace  string
+	workspaces []string
 	mtx        *sync.Mutex
 	initCalled atomic.Bool
+	noCleanup  bool
+
+	preservedWorkspaces []string
 }
 
 // NewMockEngine creates a new mock engine
@@ -26,6 +30,29 @@ func NewMockEngine(modelID string) *MockEngine {
 		modelID: modelID,
 		mtx:     &sync.Mutex{},
 	}
+}
+
+// MockEngineBuilder builds a MockEngine with options
+type MockEngineBuilder struct {
+	engine *MockEngine
+}
+
+// NewMockEngineBuilder creates a builder for MockEngine
+func NewMockEngineBuilder(modelID string) *MockEngineBuilder {
+	return &MockEngineBuilder{
+		engine: NewMockEngine(modelID),
+	}
+}
+
+// WithNoCleanup configures the engine to skip deleting workspace directories
+// during Shutdown. Useful for debugging.
+func (b *MockEngineBuilder) WithNoCleanup(noCleanup bool) *MockEngineBuilder {
+	b.engine.noCleanup = noCleanup
+	return b
+}
+
+func (b *MockEngineBuilder) Build() *MockEngine {
+	return b.engine
 }
 
 func (m *MockEngine) Initialize(ctx context.Context) error {
@@ -44,7 +71,7 @@ func (m *MockEngine) Execute(ctx context.Context, req *ExecutionRequest) (*Execu
 	start := time.Now()
 
 	// Clean up any previous workspace before creating a new one
-	if m.workspace != "" {
+	if m.workspace != "" && !m.noCleanup {
 		if err := os.RemoveAll(m.workspace); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to remove old mock workspace %s: %v\n", m.workspace, err)
 		}
@@ -58,6 +85,9 @@ func (m *MockEngine) Execute(ctx context.Context, req *ExecutionRequest) (*Execu
 		return nil, fmt.Errorf("failed to create mock workspace: %w", err)
 	}
 	m.workspace = tmpDir
+	if m.noCleanup {
+		m.workspaces = append(m.workspaces, tmpDir)
+	}
 
 	// Write request resources into the workspace
 	if err := setupWorkspaceResources(m.workspace, req.Resources); err != nil {
@@ -86,15 +116,24 @@ func (m *MockEngine) Execute(ctx context.Context, req *ExecutionRequest) (*Execu
 }
 
 func (m *MockEngine) Shutdown(ctx context.Context) error {
-	if m.workspace != "" {
+	if m.noCleanup {
+		m.preservedWorkspaces = append(m.preservedWorkspaces, m.workspaces...)
+		m.workspaces = nil
+	} else if m.workspace != "" {
 		if err := os.RemoveAll(m.workspace); err != nil {
 			return fmt.Errorf("failed to remove mock workspace %s: %w", m.workspace, err)
 		}
-		m.workspace = ""
 	}
+	m.workspace = ""
 	return nil
 }
 
 func (m *MockEngine) SessionUsage(sessionID string) *models.UsageStats {
 	return nil
+}
+
+// PreservedWorkspaces returns the workspace directories that were preserved
+// during Shutdown when noCleanup is enabled. Returns nil otherwise.
+func (m *MockEngine) PreservedWorkspaces() []string {
+	return m.preservedWorkspaces
 }

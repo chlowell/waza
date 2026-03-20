@@ -53,6 +53,7 @@ func resetRunGlobals() {
 	reporters = nil
 	suggestFlag = false
 	updateSnapshots = false
+	noCleanup = false
 	newCopilotClientFn = nil
 }
 
@@ -221,6 +222,33 @@ func TestRunCommand_MissingSpecFile(t *testing.T) {
 	err := cmd.Execute()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to load spec")
+}
+
+func TestRunCommand_NoCleanup_PrintsPreservedWorkspacesOnBenchmarkError(t *testing.T) {
+	resetRunGlobals()
+	defer resetRunGlobals()
+
+	specPath := createTestSpec(t, "mock")
+	require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(specPath), "trigger_tests.yaml"), []byte("not: valid: yaml"), 0o644))
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	t.Setenv("TMP", tmp)
+
+	cmd := newRunCommand()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{specPath, "--no-cleanup"})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "loading trigger tests")
+	assert.Contains(t, stdout.String(), "Preserved workspaces (--no-cleanup):")
+	assert.Contains(t, stdout.String(), "waza-mock-")
+
+	entries, readErr := os.ReadDir(tmp)
+	require.NoError(t, readErr)
+	assert.NotEmpty(t, entries)
 }
 
 func TestRunCommand_InvalidSpecFile(t *testing.T) {

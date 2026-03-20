@@ -424,6 +424,8 @@ func (e *copilotTestEngine) Shutdown(context.Context) error { return nil }
 
 func (e *copilotTestEngine) SessionUsage(string) *models.UsageStats { return nil }
 
+func (e *copilotTestEngine) PreservedWorkspaces() []string { return nil }
+
 func (e *copilotTestEngine) LastSuggestionMessage() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()

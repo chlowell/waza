@@ -26,6 +26,11 @@ type AgentEngine interface {
 	// data from session.shutdown events that fire during Shutdown().
 	// Returns nil if no usage data is available for the given session.
 	SessionUsage(sessionID string) *models.UsageStats
+
+	// PreservedWorkspaces returns the list of workspace directories that were
+	// preserved (not cleaned up) during Shutdown. Returns nil when cleanup
+	// was not skipped.
+	PreservedWorkspaces() []string
 }
 
 // ExecutionRequest represents a test execution request

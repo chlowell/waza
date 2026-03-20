@@ -46,6 +46,8 @@ func (e *suggestTestEngine) Shutdown(context.Context) error { return nil }
 
 func (e *suggestTestEngine) SessionUsage(string) *models.UsageStats { return nil }
 
+func (e *suggestTestEngine) PreservedWorkspaces() []string { return nil }
+
 func writeSuggestSkill(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
